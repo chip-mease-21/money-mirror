@@ -180,15 +180,15 @@ document.addEventListener('DOMContentLoaded', async function() {
 
 <script>
 (function(){
-  // Money Mirror result capture — sends completed results to a Google Sheet.
+  // Money Mirror result capture (v2) — adds an email field on the results
+  // screen and sends each completed result to a Google Sheet.
   if (window.__mmCaptureInstalled) return;
   window.__mmCaptureInstalled = true;
 
-  var ENDPOINT = "https://script.google.com/macros/s/AKfycbyUcubmA9yg-fbe-bOu3Equ3DPWUCIgFsyVN0813LqxwbLB5kmQf_GoTCP3yCpEknHa/exec";  // replaced with the deployed Apps Script URL
-  var sent = false;
-  var nameVal = "";
+  var ENDPOINT = "https://script.google.com/macros/s/AKfycbyUcubmA9yg-fbe-bOu3Equ3DPWUCIgFsyVN0813LqxwbLB5kmQf_GoTCP3yCpEknHa/exec";
+  var sent = false, reached = false, nameVal = "", emailVal = "", result = null;
 
-  // Capture the optional first name as the person types it.
+  // Capture the optional first name from the assessment's own intro field.
   document.addEventListener('input', function(e){
     try {
       var el = e.target;
@@ -199,43 +199,107 @@ document.addEventListener('DOMContentLoaded', async function() {
     } catch (_) {}
   }, true);
 
-  function txt(node){ return node ? (node.textContent || '').replace(/\s+/g,' ').trim() : ''; }
+  function txt(n){ return n ? (n.textContent || '').replace(/\s+/g,' ').trim() : ''; }
   function visible(el){ return !!(el && (el.offsetParent !== null || el.getClientRects().length)); }
 
-  function trySend(){
-    if (sent || !ENDPOINT || ENDPOINT.indexOf('__ENDPOINT') === 0) return;
-    try {
-      var heartLabel = document.getElementById('mm-heart');
-      var trackLabel = document.getElementById('mm-track');
-      if (!heartLabel || !trackLabel || !visible(trackLabel)) return;
-      var heartCard = heartLabel.nextElementSibling;
-      var trackCard = trackLabel.nextElementSibling;
-      var primaryHeart = txt(heartCard && heartCard.querySelector('h2'));
-      var track        = txt(trackCard && trackCard.querySelector('h2'));
-      if (!primaryHeart || !track) return;  // wait until fully rendered
+  function hasPlaceholder(s){ return /\{\{|\}\}/.test(s || ''); }
 
-      var payload = {
-        ts: new Date().toISOString(),
-        name: nameVal,
-        greeting: txt(document.querySelector('h1')),
-        primaryHeart: primaryHeart,
-        track: track,
-        url: location.href,
-        ua: navigator.userAgent
-      };
-      sent = true;
-      fetch(ENDPOINT, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(payload)
-      }).catch(function(){ sent = false; });
-    } catch (_) {}
+  function scrape(){
+    var hL = document.getElementById('mm-heart'), tL = document.getElementById('mm-track');
+    if (!hL || !tL || !visible(tL)) return null;
+    var hc = hL.nextElementSibling, tc = tL.nextElementSibling;
+    var ph = txt(hc && hc.querySelector('h2')), tr = txt(tc && tc.querySelector('h2'));
+    if (!ph || !tr) return null;
+    // Ignore the un-hydrated template state (raw {{ pName }} / {{ tName }} markup).
+    if (hasPlaceholder(ph) || hasPlaceholder(tr)) return null;
+    // Greeting = the visible <h1> on the results screen (avoid the landing headline).
+    var h1s = [].slice.call(document.querySelectorAll('h1')).filter(visible);
+    var greeting = h1s.length ? txt(h1s[h1s.length - 1]) : '';
+    if (hasPlaceholder(greeting)) greeting = '';
+    return { primaryHeart: ph, track: tr, greeting: greeting };
   }
 
-  try { new MutationObserver(trySend).observe(document, {childList:true, subtree:true}); } catch (_) {}
-  document.addEventListener('DOMContentLoaded', trySend);
-  setInterval(trySend, 1500);  // safety net
+  function send(){
+    if (sent || !ENDPOINT || ENDPOINT.indexOf('__ENDPOINT') === 0) return;
+    var r = result || scrape();
+    if (!r) return;
+    sent = true;
+    var payload = {
+      ts: new Date().toISOString(), name: nameVal, email: emailVal,
+      primaryHeart: r.primaryHeart, track: r.track, greeting: r.greeting,
+      url: location.href, ua: navigator.userAgent
+    };
+    var json = JSON.stringify(payload);
+    var ok = false;
+    try { ok = navigator.sendBeacon(ENDPOINT, new Blob([json], {type:'text/plain;charset=utf-8'})); } catch (_) {}
+    if (!ok) {
+      try { fetch(ENDPOINT, {method:'POST', mode:'no-cors',
+        headers:{'Content-Type':'text/plain;charset=utf-8'}, body: json}); } catch (_) {}
+    }
+  }
+
+  function injectCard(){
+    if (document.getElementById('mm-emailcard')) return;
+    var heartLink = document.querySelector('a[href="#mm-heart"]');
+    var nav = heartLink ? heartLink.parentElement : null;
+    if (!nav || !nav.parentElement) return;
+
+    var card = document.createElement('div');
+    card.id = 'mm-emailcard';
+    card.style.cssText = "background:#fff;border:1px solid var(--line);border-radius:18px;padding:20px 22px;margin:0 0 28px";
+    card.innerHTML =
+      '<div style="font:600 11px/1 \'Hanken Grotesk\',sans-serif;letter-spacing:.16em;text-transform:uppercase;color:var(--accent-deep);margin-bottom:10px">Stay connected</div>' +
+      '<div style="font-size:14.5px;line-height:1.5;color:var(--muted);margin-bottom:14px">Add your email if you’d like someone to follow up with you about your results.</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:10px">' +
+        '<input id="mm-em-name" type="text" placeholder="First name" autocomplete="given-name" style="flex:1;min-width:140px;padding:12px 14px;border:1.5px solid var(--line);border-radius:11px;font:500 15px/1.2 \'Hanken Grotesk\',sans-serif;color:var(--ink)">' +
+        '<input id="mm-em-email" type="email" placeholder="Email address" autocomplete="email" style="flex:2;min-width:180px;padding:12px 14px;border:1.5px solid var(--line);border-radius:11px;font:500 15px/1.2 \'Hanken Grotesk\',sans-serif;color:var(--ink)">' +
+        '<button id="mm-em-btn" type="button" style="padding:12px 22px;border:none;border-radius:11px;background:var(--accent-deep);color:#fff;font:600 14px/1 \'Hanken Grotesk\',sans-serif;cursor:pointer">Send</button>' +
+      '</div>' +
+      '<div id="mm-em-status" style="font-size:13px;margin-top:10px;display:none"></div>';
+    nav.parentElement.insertBefore(card, nav);
+
+    var nm = card.querySelector('#mm-em-name');
+    var em = card.querySelector('#mm-em-email');
+    var btn = card.querySelector('#mm-em-btn');
+    var st = card.querySelector('#mm-em-status');
+    if (nm && nameVal) nm.value = nameVal;
+
+    // Live-capture so a typed email is still saved even if Send isn't clicked.
+    nm.addEventListener('input', function(){ nameVal = (nm.value || '').trim(); });
+    em.addEventListener('input', function(){ emailVal = (em.value || '').trim(); });
+
+    function status(msg, isErr){
+      st.textContent = msg;
+      st.style.color = isErr ? '#b3261e' : 'var(--accent-deep)';
+      st.style.display = 'block';
+    }
+    btn.addEventListener('click', function(){
+      var e = (em.value || '').trim();
+      if (nm.value) nameVal = nm.value.trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { status('Please enter a valid email.', true); return; }
+      emailVal = e;
+      send();
+      status('✓ Thank you — we’ll be in touch.', false);
+      btn.disabled = true; btn.style.opacity = '.6'; btn.style.cursor = 'default';
+    });
+  }
+
+  function onResults(){
+    var r = scrape();
+    if (!r) return;
+    reached = true; result = r;
+    injectCard();
+  }
+
+  try { new MutationObserver(onResults).observe(document, {childList:true, subtree:true}); } catch (_) {}
+  document.addEventListener('DOMContentLoaded', onResults);
+  setInterval(onResults, 1500);
+
+  // Ensure everyone who reaches results is captured, even without clicking Send.
+  function flush(){ if (reached && !sent) send(); }
+  window.addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') flush(); });
+  window.addEventListener('beforeunload', flush);
 })();
 
 </script>
